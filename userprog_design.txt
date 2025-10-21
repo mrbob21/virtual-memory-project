@@ -1,0 +1,452 @@
+                    +--------------------------+
+                     |           CS 439         |
+                     | PROJECT 2: USER PROGRAMS |
+                     |      DESIGN DOCUMENT     |
+                     +--------------------------+
+
+For this design document, please *each* submit the header, but you do not need
+to fill out the questions.  We will cover all questions (in content, if not in
+form) in the interview.
+
+When you have completed the header, submit it to the Canvas assignment
+Project 2 Design and Documentation.  ***Your submission must be a text file and
+each line must not extend past 80 characters.  (Note that rtf files are NOT text
+files.)
+
+---- Team Information  ----
+
+>> Fill your names, UT EIDs, CS logins, email addresses, and unique numbers:
+
+Name: Enoch Amat
+EID: eya258
+CS login: eamat
+Email: enoch.amat@gmail.com
+Unique Number: 54895
+
+Name: Franklin Wright
+EID: fsw273
+CS login: fsw
+Email: franklinwrighttx@gmail.com
+Unique Number: 54890
+
+Name: Tuan Le	
+EID: TL32276	
+CS login: tuanle
+Email: tuanle@utexas.edu
+Unique Number: 54900
+
+Name: Andrew Gerst
+EID: acg4569
+CS login: gersta
+Email: andrew.gerst@utexas.edu
+Unique Number: 54880
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+>>
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+>>
+
+>> Please paste a link to your GitLab repo below.
+>>
+
+                           ARGUMENT PASSING
+                           ================
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', define, or
+>> enumeration that was necessary to implement argument passing.  
+>> Identify the purpose of each in 25 words or less.
+>>
+
+File location: process.c  
+// Create user stack page and initialize argc/argv from file_name, sets *esp.
+static bool setup_stack (void **esp, char *file_name)
+
+We modified the setup_stack function to take the program’s full command
+line, allowing arguments to be parsed and placed onto the user stack. This
+change lets us delay argument parsing until we get into setup_stack.
+
+---- ALGORITHMS ----
+
+>> A2: Briefly describe how you implemented argument parsing.  How do
+>> you arrange for the elements of argv[] to be in the right order?
+>> How do you avoid overflowing the stack page?  Is it enough to limit
+>> the size of the incoming commandline?  Why or Why not?
+>>
+
+We tokenize the full command line using strtok_r, storing each argument token
+into a temporary array and counting how many arguments were found. Once all
+tokens are collected, we push the argument strings onto the user stack in
+reverse order, starting from the last argument and ending with the program
+name. For each argument pushed, we record its starting address on the stack in
+a separate array.
+
+After all strings are copied, we word-align the stack pointer to a 4-byte
+boundary, push a null value for argv[argc], and then push the saved addresses
+in reverse order so that argv[0] points to the first argument, argv[1] to the
+second, and so on. Finally, we push the pointer to argv[], then argc, and
+lastly a fake return address. Pushing strings and addresses in reverse order
+ensures that argv[] appears in the correct order when the user program starts.
+
+To avoid overflowing the stack, we make sure that every push operation stays
+within the single 4 KB stack page. We check that each new push would not move
+the stack pointer below the base of the stack. Simply limiting the length of
+the incoming command line is not enough, because even a short command line
+could contain many small tokens, and the total space needed for argument
+strings, pointers, alignment, and metadata could still exceed the page size.
+Therefore, we must actively verify available space while building the stack to
+prevent overwriting memory outside the stack page.
+
+---- RATIONALE ----
+
+>> A3: Why does Pintos implement strtok_r() but not strtok()?
+>>
+
+Pintos implements strtok_r() instead of strtok() because the regular strtok()
+function is not thread-safe. It keeps track of where it left off using a shared
+variable inside the function, so if two threads call strtok() at the same time, 
+they can interfere with each other and mix up their progress.
+
+strtok_r() fixes this by using an extra parameter, save_ptr, which keeps each
+thread’s progress separate. This lets multiple threads or processes safely
+split strings at the same time without affecting one another. Since Pintos runs
+multiple threads in the kernel, it needs this safer version, so only strtok_r()
+is implemented.
+
+>> A4: In Pintos, the kernel separates commands into an executable name
+>> and arguments.  In Unix-like systems, the shell does this
+>> separation.  Identify at least two advantages of the Unix approach.
+>>
+
+One advantage of the Unix approach is flexibility. Since the shell handles 
+separating the command and its arguments, the kernel doesn’t need to understand 
+or parse command lines. This allows users to write more powerful shells that can
+handle features like pipes, input/output redirection, and scripting without 
+changing the operating system itself.
+
+Another advantage is simplicity within the kernel. By keeping argument parsing 
+in user space, the kernel remains smaller and easier to maintain. The kernel 
+just needs to load and run a program with whatever arguments it’s given, while 
+the shell can evolve independently to support new syntax or user features 
+without affecting system-level code.
+
+                             SYSTEM CALLS
+                             ============
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', define, or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+>>
+
+File location: syscall.c, syscall.h, thread.h, process.h
+// Global lock to serialize file system operations in syscalls.
+struct lock file_lock;
+
+// Tracks an open file and its descriptor for a process.
+struct file_process
+{
+  int fd;                // Unique file descriptor for this process.
+  struct file *file;     // Pointer to the opened file object.
+  struct list_elem elem; // Used to link into the process's open file list.
+};
+
+struct thread
+{
+  struct list child_list;   /* List of child processes. */
+  struct child_process *cp; /* This thread's child_process struct. */
+  int fd;                   /* Next file descriptor to allocate. */
+  struct list file_list;    /* List of file_process structs. */
+  struct file *file;        /*File currently being executed. */
+}
+
+// Tracks a child process and coordinates load and wait synchronization.
+struct child_process {
+  tid_t pid;                     // Thread ID of the child process.  
+  int exit_status;               // Exit code returned when the child ends.  
+  bool exited;                   // True if the child has exited.  
+
+  struct semaphore sema_load;    // Syncs parent and child during load.  
+  bool load_success;             // True if the load succeeded.  
+
+  struct semaphore sema_wait;    // Blocks parent until child exits.  
+  struct list_elem elem;         // Links to parent's child list.  
+};
+
+We added a global lock called file_lock to prevent race conditions when multiple
+threads access the file system at the same time. This ensures that operations
+like reading, writing, or creating files occur one at a time, keeping shared 
+file data consistent.
+
+We also introduced the file_process struct to keep track of files opened by each
+process. It stores the file descriptor, a pointer to the actual file, and a list
+element so that all open files for a process can be maintained in a linked list.
+This allows system calls such as open, read, write, and close to safely manage 
+files for each process independently.
+
+New struct members were added to the thread struct for child process management 
+when implementing syscalls. A thread now has a list of its child processes and a
+child_process struct representing its own entry. The other members support the 
+open syscall implementation, including a file descriptor counter, a list of 
+files the thread has opened, and a pointer to the executable file it is 
+currently running.
+
+We also added a child_process struct to process.h to support process_execute, 
+which manages parent–child interactions when running user programs. It includes
+semaphores for synchronization, a pid and exit_status for communicating results,
+and allows the parent to wait for the child during loading. To protect running
+executables, the thread keeps its executable file open with writes denied until
+it exits.
+
+>> B2: Describe how file descriptors are associated with open files.
+>> Are file descriptors unique within the entire OS or just within a
+>> single process?
+>>
+
+In our code, each process keeps its own list of open files, stored as
+file_process structs that pair a file pointer with a unique file descriptor.
+When a process calls open, a new file_process is created, assigned the next
+available file descriptor number in that process, and added to its file_list.
+
+File descriptors are only unique within a single process, not across the entire
+operating system. This means two different processes can have the same file
+descriptor value referring to completely different files. The kernel uses each
+process’s file_list to look up the correct file when system calls like read,
+write, or close are made.
+
+---- ALGORITHMS ----
+
+>> B3: Describe your code for accessing user data in the
+>> kernel.
+>>
+
+User data passed into system calls is validated before being accessed in the
+kernel. Each pointer from user space is checked using getpage, which ensures the
+address is not null, lies within user space, and is mapped to a valid physical
+page. For buffers that span multiple pages, each page in the range is validated
+to prevent faults during copying. If any check fails, the process exits with -1
+to prevent the kernel from crashing. The get_arg function retrieves system call
+arguments from the user stack after validating each address.
+
+The validate_str function walks through string arguments one character at a
+time until the null terminator is reached to confirm the entire string is
+readable and valid in its mappings. For buffers used in read or write calls,
+getpage provides a valid kernel address mapping so data can safely be accessed.
+Together, these functions ensure that all user memory references are verified
+before use, preventing invalid accesses and maintaining kernel stability.
+
+>> B4: Suppose a system call causes a full page (4,096 bytes) of data
+>> to be copied from user space into the kernel.  Based on your code, 
+>> what is the least and the greatest possible number of inspections of 
+>> the page table (e.g. calls to pagedir_get_page()) that might result?  
+>> What about for a system call that only copies 2 bytes of data?  Is there 
+>> room for improvement in these numbers, and how much?
+>>
+
+For a system call that copies a 4,096-byte buffer, we validate pages spanned by
+the range. If the buffer is page-aligned and contained within a single page,
+the least and greatest inspections are one. If it straddles a boundary, up to
+two inspections are needed. For a 2-byte copy, the count is one if contained
+in a page, or two if it crosses a boundary.
+
+Yes, there is room for improvement in these numbers. When fetching arguments
+from the user stack, our code currently checks each argument byte by byte, which
+can call pagedir_get_page() up to four times per argument. This could be reduced
+by validating each spanned page rather than each byte. For strings, our code
+calls pagedir_get_page() once per character until the null terminator is
+reached, which makes it run in O(n) time with respect to the string length. A
+more efficient approach would validate one page at a time rather than one
+character at a time, reducing the cost to O(p), where p is the number of pages
+touched by the string or buffer.
+
+>> B5: Any access to user program memory at a user-specified address
+>> can fail due to a bad pointer value.  Such accesses must cause the
+>> process to be terminated.  System calls are fraught with such
+>> accesses, e.g. a "write" system call requires reading the system
+>> call number from the user stack, then each of the call's three
+>> arguments, then an arbitrary amount of user memory, and any of
+>> these can fail at any point.  This poses a design and
+>> error-handling problem: how do you best avoid obscuring the primary
+>> function of code in a morass of error-handling?  Furthermore, when
+>> an error is detected, how do you ensure that all temporarily
+>> allocated resources (locks, buffers, etc.) are freed?  In a few
+>> sentences, describe the strategy or strategies you adopted for
+>> managing these issues.  Give an example.
+>>
+
+The strategies we used focused on centralizing checks and failing fast. All user
+pointers go through small helpers first. getpage validates a user address and
+returns a kernel mapping or triggers exit(-1) on failure. Helper methods such as
+getpage, get_arg, and validate_str handle validation up front so the syscall
+body stays focused on the main work instead of scattered checks.
+
+For resources, we keep critical sections small and pair every acquire with an
+immediate, obvious release before any return. In open, we acquire file_lock, try
+filesys_open, and on any failure set the return value and release the lock
+before exiting that branch. We do the same in read and write: validate the
+buffer up front, handle the fd 0 or fd 1 fast path, and for file-backed ops
+acquire the lock, check the descriptor, do the I/O, then release the lock right
+away. This pattern avoids leaks and keeps the main logic readable.
+
+Example: in write(fd, buffer, size), we first validate the buffer once with 
+getpage. If fd == 1, we call putbuf and return. Otherwise we acquire file_lock, 
+look up the file, and on a missing file we set f->eax = -1, release the lock, 
+and return. If present, we write, release the lock, and set the result.
+
+---- SYNCHRONIZATION ----
+
+>> B6: Briefly describe your implementation of the "wait" system call
+>> and how it interacts with process termination.
+>>
+
+In our implementation, we create a per-child record when a process calls exec.
+The parent allocates a child_process entry, stores the child’s pid and default
+exit status, and initializes two semaphores: one for load completion and one for
+waiting. The parent blocks on the load semaphore so it learns whether the child
+loaded successfully before exec returns.
+
+wait(pid) searches the caller’s child list for that pid. If found, it blocks on
+the child’s wait semaphore until the child exits. On exit, the child sets its
+record’s exit_status, marks itself as exited = true, and signals the wait
+semaphore from process_exit. The waiter then returns the saved exit status,
+removes the child record from its list, and frees it. If the pid is not a direct
+child or has already been waited on, wait returns −1. This setup cleanly ties
+process termination to wait: the child’s exit wakes exactly one waiting parent,
+delivers the correct status, and prevents double waits or leaks.
+
+>> B7: Consider parent process P with child process C.  Explain how
+>> how your code ensures synchronization and avoids race conditions
+>> in each of the following cases:
+>> a) when P calls wait(C) before C exits?  
+>> b) when P calls wait(C) after C exits?  
+>> c) when P terminates without waiting before C exits?  
+>> d) when P terminates without waiting after C exits?  
+>> e) Are there any special cases?
+>>
+
+a) P calls wait(C) before C exits:
+When P calls wait on C’s pid, it finds the child record and blocks on the
+child’s wait semaphore. In process_exit, C sets its exit status, marks
+exited = true, and ups that semaphore. P wakes and returns the saved status.
+
+b) P calls wait(C) after C exits:
+C has already set exited = true and posted the wait semaphore. P finds the
+child record and returns the recorded status immediately without blocking.
+
+c) P terminates without waiting before C exits:
+On exit, P frees any remaining child records in its child list. C later exits
+independently and sets its exit status. There is no parent waiting, so no one
+blocks on C. Resources associated with P’s tracking of C are not leaked.
+
+d) P terminates without waiting after C exits:
+C already set exited = true and posted the semaphore. When P exits, it
+removes and frees the completed child record. No threads are left blocked.
+
+e) Special cases:
+wait returns −1 if the pid is not a direct child or was already waited on.
+Only one successful wait is allowed per child. The parent also synchronizes
+with the child’s initial load using a separate load semaphore so exec does
+not return until the child reports load success or failure.
+
+>> B8: The "exec" system call returns -1 if loading the new executable
+>> fails, so it cannot return before the new executable has completed
+>> loading.  How does your code ensure this?  How is the load
+>> success/failure status passed back to the thread that calls "exec"?
+>>
+
+We make exec wait for the child’s loader by combining a shared child record with
+a semaphore to enforce ordering. In process_execute, after creating the child,
+the parent blocks on the child’s load semaphore rather than returning
+immediately. The child begins in start_process, attempts load, then writes the
+outcome into the shared record’s load_success flag and signals the semaphore.
+That signal is the parent’s release point. Only then does the parent read
+load_success and return either the new pid or −1 if loading failed.
+
+This design passes status through the shared record and uses the semaphore to
+avoid races. The parent does not rely on guesses or repeated checks; instead, it
+sleeps until the child has finished the loader path and recorded the final 
+result. If the loader failed, the child will set failure, signal, and typically 
+call thread_exit, so the parent wakes and returns −1. If the loader succeeded, 
+the parent wakes with load_success set, returns the child pid, and normal 
+execution continues. This guarantees that exec() never returns before loading is
+complete and that the return value always matches the true load outcome.
+
+---- RATIONALE ----
+
+>> B9: What advantages or disadvantages can you see to your design
+>> for file descriptors?
+>>
+
+Our file descriptor design keeps file tracking simple and process-specific. Each
+process maintains its own list of open files, stored as file_process structs
+that pairs a file descriptor number with a pointer to the opened file. This 
+makes lookups and cleanup straightforward, since each process can close or free 
+its files without affecting others. It also naturally allows different processes
+to reuse the same descriptor numbers, avoiding conflicts across the system.
+
+A key advantage of this design is clarity and isolation: descriptors are easy to
+manage and cannot interfere between processes. It also scales well, as lookups
+and closes only touch the current process’s list. The main disadvantage is that
+lookups through a linked list are slower than using a table or array structure,
+especially when a process has many open files. However, because most user
+programs open only a few files, this design is simple, efficient enough, and
+easy to maintain.
+
+>> B10: The default tid_t to pid_t mapping is the identity mapping.
+>> If you changed it, what advantages are there to your approach?
+>>
+
+We kept the default identity mapping between tid_t and pid_t, where a process’s
+thread ID also serves as its process ID. This keeps the implementation simple
+and avoids the need for an extra mapping structure between threads and
+processes.
+
+If we were to change it, separating tid_t and pid_t could provide clearer
+distinctions between threads and processes, especially if the system were later
+extended to support multiple threads per process. A separate mapping would make
+it easier to manage process groups, implement thread-level scheduling, or add
+features like process inheritance. However, for our current single-thread-per-
+process design, the identity mapping is efficient, as well as sufficient.
+
+                           SURVEY QUESTIONS
+                           ================
+
+Answering these questions is optional, but it will help us improve the
+course in future semesters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the semester.
+
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+>>
+
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+>>
+
+
+>> Is there some particular fact or hint we should give students in
+>> future semesters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+>>
+
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future semesters or the remaining projects?
+>>
+
+
+>> Any other comments?
+>>
