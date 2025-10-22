@@ -116,8 +116,9 @@ static void syscall_handler (struct intr_frame *f UNUSED)
             {
               cur->cp->exit_status = status;
             }
-          if (status < 0)
+          if (status < 0) {
             status = -1;
+          }
           printf ("%s: exit(%d)\n", cur->name, status);
           thread_exit ();
           break;
@@ -145,9 +146,9 @@ static void syscall_handler (struct intr_frame *f UNUSED)
           validate_str ((const void *) args[0]);
           const char *name = (const char *) getpage ((const void *) args[0]);
           lock_acquire (&file_lock);
-          int works = filesys_create (name, args[1]);
+          int result = filesys_create (name, args[1]);
           lock_release (&file_lock);
-          f->eax = works;
+          f->eax = result;
           break;
         }
 
