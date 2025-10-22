@@ -187,6 +187,7 @@ static void syscall_handler (struct intr_frame *f UNUSED)
                   fp->file = file;
                   fp->fd = cur->fd;
                   cur->fd++;
+                  // COMMENT: DO FD-- LATER WHEN FREEING FILE DESCRIPTOR
                   list_push_back (&cur->file_list, &fp->elem);
                   f->eax = fp->fd;
                   lock_release (&file_lock);

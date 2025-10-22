@@ -163,14 +163,20 @@ int process_wait (tid_t child_tid UNUSED)
       // Checks and wait on child if it's the same tid.
       if (cp->pid == child_tid)
         {
-          while (!cp->exited)
-            {
+          // COMMENT: remove this, while unnecessary
+          // while (!cp->exited)
+          //   {
               // Blocks until child exits.
               sema_down (&cp->sema_wait);
-            }
+            // }
 
           // Gets and return child's status. Free child process struct.
           int status = cp->exit_status;
+
+          /* COMMENT: need a semaphore somewhere here so that we get the 
+          status back from the child, the child should not exit on its own
+          without notifying the parent */
+
           list_remove (child_elem);
           palloc_free_page (cp);
           return status;
@@ -217,6 +223,7 @@ void process_exit (void)
       struct child_process *cp =
           list_entry (child_elem, struct child_process, elem);
       palloc_free_page (cp);
+      // COMMENT: add semaphore, needs up to be upped for all children
     }
 
   /* Destroy the current process's page directory and switch back
